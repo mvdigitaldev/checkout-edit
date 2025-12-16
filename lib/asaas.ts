@@ -132,6 +132,29 @@ export async function createCustomer(
   });
 }
 
+export interface UpdateCustomerData {
+  name?: string;
+  cpfCnpj?: string;
+  email?: string;
+  phone?: string;
+  mobilePhone?: string;
+  /**
+   * true to disable sending billing notifications (email/SMS) for this customer
+   * https://docs.asaas.com/reference/put_v3-customers-id
+   */
+  notificationDisabled?: boolean;
+}
+
+export async function updateCustomer(
+  customerId: string,
+  data: UpdateCustomerData
+): Promise<AsaasResponse<Customer>> {
+  return asaasRequest<Customer>(`/customers/${customerId}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
 export interface Payment {
   object: string;
   id: string;

@@ -2,6 +2,7 @@
 
 import {
   createCustomer as asaasCreateCustomer,
+  updateCustomer as asaasUpdateCustomer,
   createSubscriptionWithCreditCard as asaasCreateSubscriptionWithCreditCard,
   getSubscriptionPayments as asaasGetSubscriptionPayments,
   type Customer,
@@ -74,6 +75,32 @@ export interface CreateSubscriptionParams {
   customerData: CustomerFormData;
 }
 
+/**
+ * Cria uma assinatura recorrente mensal no Asaas
+ * 
+ * COMPORTAMENTO DAS COBRANÇAS:
+ * 
+ * 1. Quando nextDueDate = HOJE:
+ *    - O Asaas cria o primeiro pagamento imediatamente
+ *    - O pagamento é processado na mesma hora (se cartão válido)
+ *    - O próximo pagamento será criado automaticamente 1 mês depois
+ * 
+ * 2. Quando nextDueDate = DATA FUTURA (ex: próximo mês):
+ *    - O Asaas cria o pagamento mas ele fica PENDENTE até a data de vencimento
+ *    - O pagamento só será processado na data de vencimento
+ *    - O Asaas pode criar automaticamente o próximo pagamento do mês seguinte
+ *      quando a subscription é criada (dependendo da configuração da conta)
+ * 
+ * NOTIFICAÇÕES:
+ * - As notificações (email/SMS) são desativadas no cliente ao criar
+ * - Após criar a subscription, atualizamos novamente o cliente para garantir
+ *   que não há notificações sendo enviadas para as cobranças
+ * 
+ * VERIFICAÇÃO:
+ * - A função busca todos os pagamentos da subscription após criar
+ * - Os pagamentos são ordenados por data de vencimento (mais próximo primeiro)
+ * - Se nenhum pagamento for encontrado, pode ser normal se nextDueDate for futuro
+ */
 export async function createSubscription(
   params: CreateSubscriptionParams
 ): Promise<ActionResult<{ subscription: Subscription; firstPayment?: Payment }>> {
@@ -85,6 +112,9 @@ export async function createSubscription(
     const phone = customerData.phone.replace(/\D/g, "");
 
     // nextDueDate = hoje (primeiro pagamento será processado imediatamente)
+    // IMPORTANTE: Quando nextDueDate é hoje, o Asaas cria o pagamento imediatamente
+    // Quando nextDueDate é uma data futura (ex: próximo mês), o Asaas cria o pagamento
+    // mas ele fica pendente até aquela data. O pagamento só será processado na data de vencimento.
     const nextDueDate = new Date().toISOString().split("T")[0];
 
     const subscriptionData = {
@@ -121,16 +151,44 @@ export async function createSubscription(
       };
     }
 
-    // Buscar primeiro pagamento da subscription
+    // Garantir que as notificações estão desativadas no cliente
+    // Mesmo que já tenham sido desativadas na criação, atualizamos novamente
+    // para garantir que não há notificações sendo enviadas para as cobranças da subscription
+    await asaasUpdateCustomer(customerId, {
+      notificationDisabled: true,
+    });
+
+    // Buscar pagamentos da subscription para verificação
+    // IMPORTANTE: O Asaas pode criar múltiplos pagamentos:
+    // - Se nextDueDate = hoje: cria o primeiro pagamento imediatamente (será processado)
+    // - Se nextDueDate = futuro: cria o pagamento mas fica pendente até a data
+    // - Para subscriptions mensais: o Asaas pode criar automaticamente o próximo pagamento
+    //   do mês seguinte quando a subscription é criada (dependendo da configuração)
     let firstPayment: Payment | undefined;
+    let allPayments: Payment[] = [];
     const paymentsResult = await asaasGetSubscriptionPayments(result.data.id);
     if (
       paymentsResult.success &&
       paymentsResult.data?.data &&
       paymentsResult.data.data.length > 0
     ) {
-      // Pegar o primeiro pagamento da lista (primeiro processado quando subscription é criada)
-      firstPayment = paymentsResult.data.data[0];
+      allPayments = paymentsResult.data.data;
+      // Ordenar por data de criação (mais recente primeiro) ou por data de vencimento
+      // Pegar o primeiro pagamento (geralmente o que será processado primeiro)
+      firstPayment = allPayments.sort((a, b) => {
+        const dateA = new Date(a.dueDate).getTime();
+        const dateB = new Date(b.dueDate).getTime();
+        return dateA - dateB; // Ordenar do mais próximo para o mais distante
+      })[0];
+    }
+
+    // Verificação: Se não encontrou pagamentos, pode ser que ainda não tenham sido criados
+    // Isso pode acontecer se nextDueDate for uma data futura distante
+    if (allPayments.length === 0) {
+      console.warn(
+        `Nenhum pagamento encontrado para a subscription ${result.data.id}. ` +
+        `Isso pode ser normal se nextDueDate (${result.data.nextDueDate}) for uma data futura.`
+      );
     }
 
     return {
